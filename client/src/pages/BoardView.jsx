@@ -7,6 +7,7 @@ import {
   useSensor,
   useSensors,
   DragOverlay,
+  useDroppable,
 } from '@dnd-kit/core';
 import {
   SortableContext,
@@ -14,10 +15,10 @@ import {
   useSortable,
   arrayMove,
 } from '@dnd-kit/sortable';
-import { useDroppable } from '@dnd-kit/core';
 import { CSS } from '@dnd-kit/utilities';
 import api from '../services/api';
 import Modal from '../components/Modal';
+import TaskDetailModal from '../components/TaskDetailModal';
 
 const priorityStyles = {
   high: 'bg-rust/10 text-rust-dark border-rust/30',
@@ -25,7 +26,7 @@ const priorityStyles = {
   low: 'bg-charcoal/5 text-charcoal/60 border-charcoal/10',
 };
 
-function TaskCard({ task, isOverlay }) {
+function TaskCard({ task, isOverlay, onClick }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
     data: { type: 'task', task },
@@ -43,6 +44,7 @@ function TaskCard({ task, isOverlay }) {
       style={isOverlay ? undefined : style}
       {...(isOverlay ? {} : attributes)}
       {...(isOverlay ? {} : listeners)}
+      onClick={isOverlay ? undefined : () => onClick(task)}
       className={`bg-white p-3 rounded-lg border border-charcoal/10 hover:border-charcoal/20 transition-colors cursor-grab active:cursor-grabbing ${isOverlay ? 'shadow-lg rotate-2' : ''}`}
     >
       <p className="font-body text-sm text-ink mb-2">{task.title}</p>
@@ -53,18 +55,50 @@ function TaskCard({ task, isOverlay }) {
   );
 }
 
-function Column({ column, tasks, onAddTask }) {
+function Column({ column, tasks, onAddTask, onTaskClick, onDeleteColumn }) {
   const { setNodeRef, isOver } = useDroppable({
     id: `column-${column.id}`,
     data: { type: 'column', columnId: column.id },
   });
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   return (
     <div className="w-72 flex-shrink-0">
       <div className="flex items-center justify-between mb-3 px-1">
         <h2 className="font-body font-semibold text-ink text-sm">{column.name}</h2>
-        <span className="font-mono text-xs text-charcoal/50">{tasks.length}</span>
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-xs text-charcoal/50">{tasks.length}</span>
+          {!confirmingDelete ? (
+            <button
+              onClick={() => setConfirmingDelete(true)}
+              className="text-charcoal/40 hover:text-rust-dark transition-colors font-body text-sm leading-none px-1"
+              title="Delete column"
+            >
+              ×
+            </button>
+          ) : null}
+        </div>
       </div>
+
+      {confirmingDelete && (
+        <div className="mb-2 p-2 bg-rust/5 border border-rust/20 rounded-lg">
+          <p className="font-body text-xs text-charcoal mb-2">Delete "{column.name}" and all its tasks?</p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => onDeleteColumn(column.id)}
+              className="px-2 py-1 bg-rust-dark text-paper rounded font-body text-xs"
+            >
+              Delete
+            </button>
+            <button
+              onClick={() => setConfirmingDelete(false)}
+              className="px-2 py-1 font-body text-xs text-charcoal"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
 
       <SortableContext items={tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
         <div
@@ -72,7 +106,7 @@ function Column({ column, tasks, onAddTask }) {
           className={`space-y-2 min-h-[80px] rounded-lg transition-colors ${isOver ? 'bg-rust/5 ring-2 ring-rust/30' : ''}`}
         >
           {tasks.map((task) => (
-            <TaskCard key={task.id} task={task} />
+            <TaskCard key={task.id} task={task} onClick={onTaskClick} />
           ))}
 
           {tasks.length === 0 && (
@@ -110,6 +144,9 @@ export default function BoardView() {
   const [taskDescription, setTaskDescription] = useState('');
   const [taskPriority, setTaskPriority] = useState('medium');
   const [savingTask, setSavingTask] = useState(false);
+
+  const [selectedTask, setSelectedTask] = useState(null);
+  const [detailModalOpen, setDetailModalOpen] = useState(false);
 
   const [addingColumn, setAddingColumn] = useState(false);
   const [columnName, setColumnName] = useState('');
@@ -163,8 +200,6 @@ export default function BoardView() {
     if (!activeTaskObj) return;
     const activeColumnId = activeTaskObj.column_id;
 
-    // Figure out destination column: either dropped on a task (use that task's column)
-    // or dropped directly on a column's droppable zone
     let overColumnId = null;
     if (over.data.current?.type === 'task') {
       overColumnId = over.data.current.task.column_id;
@@ -174,7 +209,6 @@ export default function BoardView() {
     if (!overColumnId) return;
 
     if (activeColumnId === overColumnId) {
-      // Reordering within the same column
       const columnTasks = tasksForColumn(activeColumnId);
       const oldIndex = columnTasks.findIndex((t) => t.id === activeTaskId);
       const newIndex = columnTasks.findIndex((t) => t.id === over.id);
@@ -198,7 +232,6 @@ export default function BoardView() {
         fetchBoardData();
       }
     } else {
-      // Moving to a different column
       const destTasks = tasksForColumn(overColumnId);
       const newPosition = destTasks.length;
 
@@ -248,6 +281,31 @@ export default function BoardView() {
       setError('Failed to create task');
     } finally {
       setSavingTask(false);
+    }
+  }
+
+  function handleTaskClick(task) {
+    setSelectedTask(task);
+    setDetailModalOpen(true);
+  }
+
+  async function handleSaveTask(taskId, updates) {
+    const response = await api.patch(`/tasks/${taskId}`, updates);
+    setTasks((prev) => prev.map((t) => (t.id === taskId ? response.data.task : t)));
+  }
+
+  async function handleDeleteTask(taskId) {
+    await api.delete(`/tasks/${taskId}`);
+    setTasks((prev) => prev.filter((t) => t.id !== taskId));
+  }
+
+  async function handleDeleteColumn(columnId) {
+    try {
+      await api.delete(`/columns/${columnId}`);
+      setColumns((prev) => prev.filter((c) => c.id !== columnId));
+      setTasks((prev) => prev.filter((t) => t.column_id !== columnId));
+    } catch (err) {
+      setError('Failed to delete column');
     }
   }
 
@@ -315,6 +373,8 @@ export default function BoardView() {
                 column={column}
                 tasks={tasksForColumn(column.id)}
                 onAddTask={openTaskModal}
+                onTaskClick={handleTaskClick}
+                onDeleteColumn={handleDeleteColumn}
               />
             ))}
 
@@ -411,6 +471,14 @@ export default function BoardView() {
           </button>
         </form>
       </Modal>
+
+      <TaskDetailModal
+        task={selectedTask}
+        isOpen={detailModalOpen}
+        onClose={() => setDetailModalOpen(false)}
+        onSave={handleSaveTask}
+        onDelete={handleDeleteTask}
+      />
     </div>
   );
 }

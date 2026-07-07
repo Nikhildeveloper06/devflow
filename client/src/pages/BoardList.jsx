@@ -29,6 +29,18 @@ export default function BoardList() {
     }
   }
 
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState(null);
+
+  async function handleDeleteBoard(boardId) {
+    try {
+      await api.delete(`/boards/${boardId}`);
+      setBoards(boards.filter((b) => b.id !== boardId));
+      setConfirmingDeleteId(null);
+    } catch (err) {
+      setError('Failed to delete board');
+    }
+  }
+
   async function handleCreateBoard(e) {
     e.preventDefault();
     if (!newBoardName.trim()) return;
@@ -116,16 +128,52 @@ export default function BoardList() {
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
             {boards.map((board) => (
-              <button
+              <div
                 key={board.id}
-                onClick={() => navigate(`/boards/${board.id}`)}
-                className="text-left p-5 bg-white border border-charcoal/10 rounded-xl hover:border-rust hover:shadow-sm transition-all"
+                className="relative p-5 bg-white border border-charcoal/10 rounded-xl hover:border-rust hover:shadow-sm transition-all"
               >
-                <h3 className="font-body font-semibold text-ink mb-1">{board.name}</h3>
-                <p className="font-mono text-xs text-charcoal/60">
-                  Created {new Date(board.created_at).toLocaleDateString()}
-                </p>
-              </button>
+                {confirmingDeleteId === board.id ? (
+                  <div>
+                    <p className="font-body text-sm text-ink mb-3">Delete "{board.name}" and everything in it?</p>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleDeleteBoard(board.id)}
+                        className="px-3 py-1.5 bg-rust-dark text-paper rounded-lg font-body text-xs"
+                      >
+                        Delete
+                      </button>
+                      <button
+                        onClick={() => setConfirmingDeleteId(null)}
+                        className="px-3 py-1.5 font-body text-xs text-charcoal"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      onClick={() => navigate(`/boards/${board.id}`)}
+                      className="text-left w-full"
+                    >
+                      <h3 className="font-body font-semibold text-ink mb-1 pr-6">{board.name}</h3>
+                      <p className="font-mono text-xs text-charcoal/60">
+                        Created {new Date(board.created_at).toLocaleDateString()}
+                      </p>
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmingDeleteId(board.id);
+                      }}
+                      className="absolute top-4 right-4 text-charcoal/30 hover:text-rust-dark transition-colors text-sm"
+                      title="Delete board"
+                    >
+                      ×
+                    </button>
+                  </>
+                )}
+              </div>
             ))}
           </div>
         )}
