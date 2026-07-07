@@ -1,7 +1,97 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import {
+  DndContext,
+  closestCorners,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  DragOverlay,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  verticalListSortingStrategy,
+  useSortable,
+  arrayMove,
+} from '@dnd-kit/sortable';
+import { useDroppable } from '@dnd-kit/core';
+import { CSS } from '@dnd-kit/utilities';
 import api from '../services/api';
 import Modal from '../components/Modal';
+
+const priorityStyles = {
+  high: 'bg-rust/10 text-rust-dark border-rust/30',
+  medium: 'bg-charcoal/10 text-charcoal border-charcoal/20',
+  low: 'bg-charcoal/5 text-charcoal/60 border-charcoal/10',
+};
+
+function TaskCard({ task, isOverlay }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: task.id,
+    data: { type: 'task', task },
+  });
+
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging && !isOverlay ? 0.4 : 1,
+  };
+
+  return (
+    <div
+      ref={isOverlay ? undefined : setNodeRef}
+      style={isOverlay ? undefined : style}
+      {...(isOverlay ? {} : attributes)}
+      {...(isOverlay ? {} : listeners)}
+      className={`bg-white p-3 rounded-lg border border-charcoal/10 hover:border-charcoal/20 transition-colors cursor-grab active:cursor-grabbing ${isOverlay ? 'shadow-lg rotate-2' : ''}`}
+    >
+      <p className="font-body text-sm text-ink mb-2">{task.title}</p>
+      <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-mono border ${priorityStyles[task.priority]}`}>
+        {task.priority}
+      </span>
+    </div>
+  );
+}
+
+function Column({ column, tasks, onAddTask }) {
+  const { setNodeRef, isOver } = useDroppable({
+    id: `column-${column.id}`,
+    data: { type: 'column', columnId: column.id },
+  });
+
+  return (
+    <div className="w-72 flex-shrink-0">
+      <div className="flex items-center justify-between mb-3 px-1">
+        <h2 className="font-body font-semibold text-ink text-sm">{column.name}</h2>
+        <span className="font-mono text-xs text-charcoal/50">{tasks.length}</span>
+      </div>
+
+      <SortableContext items={tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+        <div
+          ref={setNodeRef}
+          className={`space-y-2 min-h-[80px] rounded-lg transition-colors ${isOver ? 'bg-rust/5 ring-2 ring-rust/30' : ''}`}
+        >
+          {tasks.map((task) => (
+            <TaskCard key={task.id} task={task} />
+          ))}
+
+          {tasks.length === 0 && (
+            <div className="text-center py-6 border border-dashed border-charcoal/15 rounded-lg">
+              <p className="font-body text-xs text-charcoal/40">Drop here</p>
+            </div>
+          )}
+        </div>
+      </SortableContext>
+
+      <button
+        onClick={() => onAddTask(column.id)}
+        className="w-full mt-2 py-2 text-left px-2 font-body text-sm text-charcoal/60 hover:text-rust hover:bg-white rounded-lg transition-colors"
+      >
+        + Add task
+      </button>
+    </div>
+  );
+}
 
 export default function BoardView() {
   const { id } = useParams();
@@ -12,8 +102,8 @@ export default function BoardView() {
   const [tasks, setTasks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [activeTask, setActiveTask] = useState(null);
 
-  // Add Task modal state
   const [taskModalOpen, setTaskModalOpen] = useState(false);
   const [taskModalColumnId, setTaskModalColumnId] = useState(null);
   const [taskTitle, setTaskTitle] = useState('');
@@ -21,10 +111,13 @@ export default function BoardView() {
   const [taskPriority, setTaskPriority] = useState('medium');
   const [savingTask, setSavingTask] = useState(false);
 
-  // Add Column state
   const [addingColumn, setAddingColumn] = useState(false);
   const [columnName, setColumnName] = useState('');
   const [savingColumn, setSavingColumn] = useState(false);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 4 } })
+  );
 
   useEffect(() => {
     fetchBoardData();
@@ -53,6 +146,78 @@ export default function BoardView() {
     return tasks
       .filter((t) => t.column_id === columnId)
       .sort((a, b) => a.position - b.position);
+  }
+
+  function handleDragStart(event) {
+    const task = tasks.find((t) => t.id === event.active.id);
+    setActiveTask(task);
+  }
+
+  async function handleDragEnd(event) {
+    const { active, over } = event;
+    setActiveTask(null);
+    if (!over) return;
+
+    const activeTaskId = active.id;
+    const activeTaskObj = tasks.find((t) => t.id === activeTaskId);
+    if (!activeTaskObj) return;
+    const activeColumnId = activeTaskObj.column_id;
+
+    // Figure out destination column: either dropped on a task (use that task's column)
+    // or dropped directly on a column's droppable zone
+    let overColumnId = null;
+    if (over.data.current?.type === 'task') {
+      overColumnId = over.data.current.task.column_id;
+    } else if (over.data.current?.type === 'column') {
+      overColumnId = over.data.current.columnId;
+    }
+    if (!overColumnId) return;
+
+    if (activeColumnId === overColumnId) {
+      // Reordering within the same column
+      const columnTasks = tasksForColumn(activeColumnId);
+      const oldIndex = columnTasks.findIndex((t) => t.id === activeTaskId);
+      const newIndex = columnTasks.findIndex((t) => t.id === over.id);
+      if (oldIndex === -1 || newIndex === -1 || oldIndex === newIndex) return;
+
+      const reordered = arrayMove(columnTasks, oldIndex, newIndex).map((t, index) => ({
+        ...t,
+        position: index,
+      }));
+
+      setTasks((prev) => [
+        ...prev.filter((t) => t.column_id !== activeColumnId),
+        ...reordered,
+      ]);
+
+      const movedTask = reordered.find((t) => t.id === activeTaskId);
+      try {
+        await api.patch(`/tasks/${activeTaskId}`, { position: movedTask.position });
+      } catch (err) {
+        setError('Failed to save new order');
+        fetchBoardData();
+      }
+    } else {
+      // Moving to a different column
+      const destTasks = tasksForColumn(overColumnId);
+      const newPosition = destTasks.length;
+
+      setTasks((prev) =>
+        prev.map((t) =>
+          t.id === activeTaskId ? { ...t, column_id: overColumnId, position: newPosition } : t
+        )
+      );
+
+      try {
+        await api.patch(`/tasks/${activeTaskId}`, {
+          columnId: overColumnId,
+          position: newPosition,
+        });
+      } catch (err) {
+        setError('Failed to move task');
+        fetchBoardData();
+      }
+    }
   }
 
   function openTaskModal(columnId) {
@@ -108,12 +273,6 @@ export default function BoardView() {
     }
   }
 
-  const priorityStyles = {
-    high: 'bg-rust/10 text-rust-dark border-rust/30',
-    medium: 'bg-charcoal/10 text-charcoal border-charcoal/20',
-    low: 'bg-charcoal/5 text-charcoal/60 border-charcoal/10',
-  };
-
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-paper">
@@ -135,7 +294,6 @@ export default function BoardView() {
 
   return (
     <div className="min-h-screen bg-paper">
-      {/* Header */}
       <header className="border-b border-charcoal/10 px-6 py-4 flex items-center gap-4">
         <button onClick={() => navigate('/boards')} className="font-body text-sm text-charcoal hover:text-rust">
           ← Boards
@@ -143,91 +301,68 @@ export default function BoardView() {
         <h1 className="font-display text-xl text-ink">{board?.name}</h1>
       </header>
 
-      {/* Board columns */}
       <main className="p-6 overflow-x-auto">
-        <div className="flex gap-4 min-w-max items-start">
-          {columns.map((column) => (
-            <div key={column.id} className="w-72 flex-shrink-0">
-              <div className="flex items-center justify-between mb-3 px-1">
-                <h2 className="font-body font-semibold text-ink text-sm">{column.name}</h2>
-                <span className="font-mono text-xs text-charcoal/50">
-                  {tasksForColumn(column.id).length}
-                </span>
-              </div>
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCorners}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+        >
+          <div className="flex gap-4 min-w-max items-start">
+            {columns.map((column) => (
+              <Column
+                key={column.id}
+                column={column}
+                tasks={tasksForColumn(column.id)}
+                onAddTask={openTaskModal}
+              />
+            ))}
 
-              <div className="space-y-2 min-h-[60px]">
-                {tasksForColumn(column.id).map((task) => (
-                  <div
-                    key={task.id}
-                    className="bg-white p-3 rounded-lg border border-charcoal/10 hover:border-charcoal/20 transition-colors cursor-pointer"
-                  >
-                    <p className="font-body text-sm text-ink mb-2">{task.title}</p>
-                    <span
-                      className={`inline-block px-2 py-0.5 rounded-full text-xs font-mono border ${priorityStyles[task.priority]}`}
+            <div className="w-72 flex-shrink-0">
+              {addingColumn ? (
+                <form onSubmit={handleCreateColumn} className="bg-white p-3 rounded-lg border border-charcoal/10">
+                  <input
+                    type="text"
+                    value={columnName}
+                    onChange={(e) => setColumnName(e.target.value)}
+                    placeholder="Column name"
+                    autoFocus
+                    className="w-full px-2 py-1.5 border border-charcoal/20 rounded-md bg-white font-body text-sm text-ink focus:outline-none focus:ring-2 focus:ring-rust mb-2"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      type="submit"
+                      disabled={savingColumn}
+                      className="px-3 py-1.5 bg-rust text-paper rounded-md font-body text-xs font-medium disabled:opacity-50"
                     >
-                      {task.priority}
-                    </span>
+                      {savingColumn ? 'Adding...' : 'Add'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setAddingColumn(false)}
+                      className="px-3 py-1.5 font-body text-xs text-charcoal hover:text-ink"
+                    >
+                      Cancel
+                    </button>
                   </div>
-                ))}
-
-                {tasksForColumn(column.id).length === 0 && (
-                  <div className="text-center py-6 border border-dashed border-charcoal/15 rounded-lg">
-                    <p className="font-body text-xs text-charcoal/40">No tasks</p>
-                  </div>
-                )}
-              </div>
-
-              <button
-                onClick={() => openTaskModal(column.id)}
-                className="w-full mt-2 py-2 text-left px-2 font-body text-sm text-charcoal/60 hover:text-rust hover:bg-white rounded-lg transition-colors"
-              >
-                + Add task
-              </button>
+                </form>
+              ) : (
+                <button
+                  onClick={() => setAddingColumn(true)}
+                  className="w-full py-2.5 text-left px-3 font-body text-sm text-charcoal/60 hover:text-rust border border-dashed border-charcoal/20 rounded-lg hover:border-rust transition-colors"
+                >
+                  + Add column
+                </button>
+              )}
             </div>
-          ))}
-
-          {/* Add Column */}
-          <div className="w-72 flex-shrink-0">
-            {addingColumn ? (
-              <form onSubmit={handleCreateColumn} className="bg-white p-3 rounded-lg border border-charcoal/10">
-                <input
-                  type="text"
-                  value={columnName}
-                  onChange={(e) => setColumnName(e.target.value)}
-                  placeholder="Column name"
-                  autoFocus
-                  className="w-full px-2 py-1.5 border border-charcoal/20 rounded-md bg-white font-body text-sm text-ink focus:outline-none focus:ring-2 focus:ring-rust mb-2"
-                />
-                <div className="flex gap-2">
-                  <button
-                    type="submit"
-                    disabled={savingColumn}
-                    className="px-3 py-1.5 bg-rust text-paper rounded-md font-body text-xs font-medium disabled:opacity-50"
-                  >
-                    {savingColumn ? 'Adding...' : 'Add'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setAddingColumn(false)}
-                    className="px-3 py-1.5 font-body text-xs text-charcoal hover:text-ink"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <button
-                onClick={() => setAddingColumn(true)}
-                className="w-full py-2.5 text-left px-3 font-body text-sm text-charcoal/60 hover:text-rust border border-dashed border-charcoal/20 rounded-lg hover:border-rust transition-colors"
-              >
-                + Add column
-              </button>
-            )}
           </div>
-        </div>
+
+          <DragOverlay>
+            {activeTask ? <TaskCard task={activeTask} isOverlay /> : null}
+          </DragOverlay>
+        </DndContext>
       </main>
 
-      {/* Add Task Modal */}
       <Modal isOpen={taskModalOpen} onClose={() => setTaskModalOpen(false)} title="Add Task">
         <form onSubmit={handleCreateTask} className="space-y-4">
           <div>
