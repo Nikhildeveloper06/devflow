@@ -12,9 +12,13 @@ app.use(express.json());
 const pool = require('./config/db');
 const authRoutes = require('./routes/authRoutes');
 const boardRoutes = require('./routes/boardRoutes');
+const columnRoutes = require('./routes/columnRoutes');
+const taskRoutes = require('./routes/taskRoutes');
 
 app.use('/api/auth', authRoutes);
 app.use('/api/boards', boardRoutes);
+app.use('/api/columns', columnRoutes);
+app.use('/api/tasks', taskRoutes);
 
 app.get('/api/db-test', async (req, res) => {
   try {
